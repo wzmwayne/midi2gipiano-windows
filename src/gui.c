@@ -21,14 +21,16 @@ enum {
     ID_STATIC_NOTE    = 1010,
     ID_STATIC_TIME    = 1011,
     ID_STATIC_PROGRESS = 1012,
-    ID_CHECK_COMPRESS  = 1013,
+    ID_RADIO_WRAP      = 1013,
+    ID_RADIO_EDGE      = 1014,
+    ID_RADIO_FULL      = 1015,
 
     HOTKEY_ID_TOGGLE  = 1,
 };
 
 static HWND hEditFile, hEditOctave, hEditTranspose;
 static HWND hBtnBrowse, hBtnPlay, hBtnPause, hBtnStop;
-static HWND hCheckCompress;
+static HWND hRadioWrap, hRadioEdge, hRadioFull;
 static HWND hStaticStatus, hStaticNote, hStaticTime, hStaticProgress;
 
 static HFONT hFont = NULL;
@@ -92,7 +94,7 @@ typedef struct {
     wchar_t filePath[MAX_PATH];
     int     baseOctave;
     int     transpose;
-    int     compression; /* 0 = wrap, 1 = proportional compress */
+    int     mode; /* 0 = wrap, 1 = edge fold, 2 = full compress */
 } ThreadParam;
 
 typedef enum { EV_PRESS, EV_RELEASE } EventType;
@@ -142,10 +144,29 @@ static DWORD WINAPI PlaybackThreadProc(LPVOID lpParam)
 
     PostMessageW(hWnd, WM_USER_TOTAL, 0, (LPARAM)midi.totalDurationMicros);
 
-    /* edge compression: fold out-of-range notes by exact octaves */
-    int useEdgeComp = tp->compression;
+    /* mode: 0=wrap, 1=edge fold, 2=full compress */
+    int mode = tp->mode;
     int lowBound = tp->baseOctave * 12;
     int highBound = tp->baseOctave * 12 + 35;
+
+    /* pre-scan for full compression */
+    double fullScale = 1.0;
+    int fullCenter = 0;
+    int useFull = 0;
+    if (mode == 2) {
+        int minNote = 127, maxNote = 0;
+        for (int i = 0; i < midi.noteCount; i++) {
+            int n = midi.notes[i].noteNumber;
+            if (n < minNote) minNote = n;
+            if (n > maxNote) maxNote = n;
+        }
+        int range = maxNote - minNote;
+        if (range > 36) {
+            fullScale = 36.0 / range;
+            fullCenter = (minNote + maxNote) / 2;
+            useFull = 1;
+        }
+    }
 
     /* build sorted event array */
     PlaybackEvent* events = malloc(midi.noteCount * 2 * sizeof(PlaybackEvent));
@@ -154,7 +175,7 @@ static DWORD WINAPI PlaybackThreadProc(LPVOID lpParam)
     for (int i = 0; i < midi.noteCount; i++) {
         MidiNote* mn = &midi.notes[i];
         int noteNum = mn->noteNumber;
-        if (useEdgeComp) {
+        if (mode == 1) {
             if (noteNum < lowBound) {
                 int shift = ((lowBound - noteNum + 11) / 12) * 12;
                 noteNum += shift;
@@ -162,6 +183,9 @@ static DWORD WINAPI PlaybackThreadProc(LPVOID lpParam)
                 int shift = ((noteNum - highBound + 11) / 12) * 12;
                 noteNum -= shift;
             }
+        } else if (useFull) {
+            double c = fullCenter + (noteNum - fullCenter) * fullScale;
+            noteNum = (int)(c + 0.5);
         }
         int ki = mapper_map(&mapper, noteNum);
         if (ki < 0 || ki >= KEY_COUNT) continue;
@@ -284,12 +308,16 @@ static void BeginPlayback(HWND hWnd)
     ResetEvent(hEventPause);
     ResetEvent(hEventResume);
 
+    int mode = 0;
+    if (SendMessageW(hRadioEdge, BM_GETCHECK, 0, 0)) mode = 1;
+    if (SendMessageW(hRadioFull, BM_GETCHECK, 0, 0)) mode = 2;
+
     ThreadParam* tp = malloc(sizeof(ThreadParam));
     tp->hWnd = hWnd;
     wcsncpy(tp->filePath, filePathW, MAX_PATH);
     tp->baseOctave  = octave;
     tp->transpose   = transpose;
-    tp->compression = (int)SendMessageW(hCheckCompress, BM_GETCHECK, 0, 0);
+    tp->mode        = mode;
 
     hPlayThread = CreateThread(NULL, 0, PlaybackThreadProc, tp, 0, NULL);
     if (!hPlayThread) {
@@ -393,11 +421,23 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         SendMessageW(hEditTranspose, WM_SETFONT, (WPARAM)hFont, 0);
         y += 35;
 
-        hCheckCompress = CreateWindowW(L"BUTTON", L"\u7B49\u6BD4\u4F8B\u538B\u7F29",
-            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_TABSTOP,
-            10, y, 160, 20, hWnd, (HMENU)(INT_PTR)ID_CHECK_COMPRESS,
+        CreateLabel(hWnd, 0, L"\u5904\u7406\u65B9\u5F0F:", 10, y+2, 60, 20);
+        hRadioWrap = CreateWindowW(L"BUTTON", L"\u5FAA\u73AF",
+            WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON | WS_GROUP,
+            70, y, 50, 20, hWnd, (HMENU)(INT_PTR)ID_RADIO_WRAP,
             GetModuleHandleW(NULL), NULL);
-        SendMessageW(hCheckCompress, WM_SETFONT, (WPARAM)hFont, 0);
+        hRadioEdge = CreateWindowW(L"BUTTON", L"\u8FB9\u7F18\u6298\u53E0",
+            WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
+            120, y, 70, 20, hWnd, (HMENU)(INT_PTR)ID_RADIO_EDGE,
+            GetModuleHandleW(NULL), NULL);
+        hRadioFull = CreateWindowW(L"BUTTON", L"\u6574\u4F53\u538B\u7F29",
+            WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
+            190, y, 80, 20, hWnd, (HMENU)(INT_PTR)ID_RADIO_FULL,
+            GetModuleHandleW(NULL), NULL);
+        SendMessageW(hRadioWrap, WM_SETFONT, (WPARAM)hFont, 0);
+        SendMessageW(hRadioEdge, WM_SETFONT, (WPARAM)hFont, 0);
+        SendMessageW(hRadioFull, WM_SETFONT, (WPARAM)hFont, 0);
+        SendMessageW(hRadioWrap, BM_SETCHECK, BST_CHECKED, 0);
         y += 25;
 
         hBtnPlay  = CreateButtonW(hWnd, ID_BTN_PLAY,  L"\u25B6 \u64AD\u653E",  10, y, 80, 30);
