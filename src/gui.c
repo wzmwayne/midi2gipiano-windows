@@ -21,12 +21,14 @@ enum {
     ID_STATIC_NOTE    = 1010,
     ID_STATIC_TIME    = 1011,
     ID_STATIC_PROGRESS = 1012,
+    ID_CHECK_COMPRESS  = 1013,
 
     HOTKEY_ID_TOGGLE  = 1,
 };
 
 static HWND hEditFile, hEditOctave, hEditTranspose;
 static HWND hBtnBrowse, hBtnPlay, hBtnPause, hBtnStop;
+static HWND hCheckCompress;
 static HWND hStaticStatus, hStaticNote, hStaticTime, hStaticProgress;
 
 static HFONT hFont = NULL;
@@ -90,6 +92,7 @@ typedef struct {
     wchar_t filePath[MAX_PATH];
     int     baseOctave;
     int     transpose;
+    int     compression; /* 0 = wrap, 1 = proportional compress */
 } ThreadParam;
 
 typedef enum { EV_PRESS, EV_RELEASE } EventType;
@@ -139,16 +142,41 @@ static DWORD WINAPI PlaybackThreadProc(LPVOID lpParam)
 
     PostMessageW(hWnd, WM_USER_TOTAL, 0, (LPARAM)midi.totalDurationMicros);
 
+    /* pre-scan for proportional compression */
+    int useCompression = tp->compression;
+    double compScale = 1.0;
+    int compCenter = 0;
+    if (useCompression) {
+        int minNote = 127, maxNote = 0;
+        for (int i = 0; i < midi.noteCount; i++) {
+            int n = midi.notes[i].noteNumber;
+            if (n < minNote) minNote = n;
+            if (n > maxNote) maxNote = n;
+        }
+        int range = maxNote - minNote;
+        if (range > 36) {
+            compScale = 36.0 / range;
+            compCenter = (minNote + maxNote) / 2;
+        } else {
+            useCompression = 0;
+        }
+    }
+
     /* build sorted event array */
     PlaybackEvent* events = malloc(midi.noteCount * 2 * sizeof(PlaybackEvent));
     int evCount = 0;
 
     for (int i = 0; i < midi.noteCount; i++) {
         MidiNote* mn = &midi.notes[i];
-        int ki = mapper_map(&mapper, mn->noteNumber);
+        int noteNum = mn->noteNumber;
+        if (useCompression) {
+            double c = compCenter + (noteNum - compCenter) * compScale;
+            noteNum = (int)(c + 0.5);
+        }
+        int ki = mapper_map(&mapper, noteNum);
         if (ki < 0 || ki >= KEY_COUNT) continue;
-        events[evCount++] = (PlaybackEvent){mn->startMicros, EV_PRESS,   ki, mn->noteNumber};
-        events[evCount++] = (PlaybackEvent){mn->endMicros,   EV_RELEASE, ki, mn->noteNumber};
+        events[evCount++] = (PlaybackEvent){mn->startMicros, EV_PRESS,   ki, noteNum};
+        events[evCount++] = (PlaybackEvent){mn->endMicros,   EV_RELEASE, ki, noteNum};
     }
 
     qsort(events, evCount, sizeof(PlaybackEvent), event_cmp);
@@ -269,8 +297,9 @@ static void BeginPlayback(HWND hWnd)
     ThreadParam* tp = malloc(sizeof(ThreadParam));
     tp->hWnd = hWnd;
     wcsncpy(tp->filePath, filePathW, MAX_PATH);
-    tp->baseOctave = octave;
-    tp->transpose  = transpose;
+    tp->baseOctave  = octave;
+    tp->transpose   = transpose;
+    tp->compression = (int)SendMessageW(hCheckCompress, BM_GETCHECK, 0, 0);
 
     hPlayThread = CreateThread(NULL, 0, PlaybackThreadProc, tp, 0, NULL);
     if (!hPlayThread) {
@@ -372,7 +401,14 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         CreateLabel(hWnd, 0, L"\u79FB\u8C03:", 130, y+4, 35, 20);
         hEditTranspose = CreateEdit(hWnd, ID_EDIT_TRANSPOSE, L"0", 165, y, 35, 24);
         SendMessageW(hEditTranspose, WM_SETFONT, (WPARAM)hFont, 0);
-        y += 40;
+        y += 35;
+
+        hCheckCompress = CreateWindowW(L"BUTTON", L"\u7B49\u6BD4\u4F8B\u538B\u7F29",
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+            10, y, 160, 20, hWnd, (HMENU)(INT_PTR)ID_CHECK_COMPRESS,
+            GetModuleHandleW(NULL), NULL);
+        SendMessageW(hCheckCompress, WM_SETFONT, (WPARAM)hFont, 0);
+        y += 25;
 
         hBtnPlay  = CreateButtonW(hWnd, ID_BTN_PLAY,  L"\u25B6 \u64AD\u653E",  10, y, 80, 30);
         hBtnPause = CreateButtonW(hWnd, ID_BTN_PAUSE, L"\u23F8 \u6682\u505C",  95, y, 80, 30);
