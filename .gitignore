@@ -1,0 +1,7 @@
+*.o
+*.exe
+*.deb
+/tmp/
+/.gradle/
+/build/
+*.log
