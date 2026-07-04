@@ -1,4 +1,5 @@
-CC = /tmp/mingw-root/usr/bin/x86_64-w64-mingw32-gcc-posix
+CC = x86_64-w64-mingw32-gcc-posix
+WINDRES = x86_64-w64-mingw32-windres
 CFLAGS = -O2 -std=c99 -Wall -Wextra
 LDFLAGS = -mwindows
 LIBS =
@@ -16,7 +17,7 @@ $(TARGET): $(OBJ) $(RC_OBJ)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) $(LIBS)
 
 resources/resource.o: resources/resource.rc resources/app.manifest
-	/tmp/mingw-root/bin/windres-wrap.sh -I. -o $@ resources/resource.rc
+	$(WINDRES) -I. -o $@ resources/resource.rc
 
 .c.o:
 	$(CC) $(CFLAGS) -Isrc -c $< -o $@
