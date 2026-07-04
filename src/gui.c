@@ -207,6 +207,17 @@ static DWORD WINAPI PlaybackThreadProc(LPVOID lpParam)
             double c = fullCenter + (noteNum - fullCenter) * fullScale;
             noteNum = (int)(c + 0.5) + fullShift;
         }
+        /* Edge & Full modes: fold back into the 3-octave window so that
+           the %3 wrap in mapper_map never actually wraps. */
+        if (mode != 0) {
+            if (noteNum < lowBound) {
+                int shift = ((lowBound - noteNum + 11) / 12) * 12;
+                noteNum += shift;
+            } else if (noteNum > highBound) {
+                int shift = ((noteNum - highBound + 11) / 12) * 12;
+                noteNum -= shift;
+            }
+        }
         int ki = mapper_map(&mapper, noteNum);
         if (ki < 0 || ki >= KEY_COUNT) continue;
         events[evCount++] = (PlaybackEvent){mn->startMicros, EV_PRESS,   ki, noteNum};
