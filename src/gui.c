@@ -142,25 +142,10 @@ static DWORD WINAPI PlaybackThreadProc(LPVOID lpParam)
 
     PostMessageW(hWnd, WM_USER_TOTAL, 0, (LPARAM)midi.totalDurationMicros);
 
-    /* pre-scan for proportional compression */
-    int useCompression = tp->compression;
-    double compScale = 1.0;
-    int compCenter = 0;
-    if (useCompression) {
-        int minNote = 127, maxNote = 0;
-        for (int i = 0; i < midi.noteCount; i++) {
-            int n = midi.notes[i].noteNumber;
-            if (n < minNote) minNote = n;
-            if (n > maxNote) maxNote = n;
-        }
-        int range = maxNote - minNote;
-        if (range > 36) {
-            compScale = 36.0 / range;
-            compCenter = (minNote + maxNote) / 2;
-        } else {
-            useCompression = 0;
-        }
-    }
+    /* edge compression: fold out-of-range notes by exact octaves */
+    int useEdgeComp = tp->compression;
+    int lowBound = tp->baseOctave * 12;
+    int highBound = tp->baseOctave * 12 + 35;
 
     /* build sorted event array */
     PlaybackEvent* events = malloc(midi.noteCount * 2 * sizeof(PlaybackEvent));
@@ -169,9 +154,14 @@ static DWORD WINAPI PlaybackThreadProc(LPVOID lpParam)
     for (int i = 0; i < midi.noteCount; i++) {
         MidiNote* mn = &midi.notes[i];
         int noteNum = mn->noteNumber;
-        if (useCompression) {
-            double c = compCenter + (noteNum - compCenter) * compScale;
-            noteNum = (int)(c + 0.5);
+        if (useEdgeComp) {
+            if (noteNum < lowBound) {
+                int shift = ((lowBound - noteNum + 11) / 12) * 12;
+                noteNum += shift;
+            } else if (noteNum > highBound) {
+                int shift = ((noteNum - highBound + 11) / 12) * 12;
+                noteNum -= shift;
+            }
         }
         int ki = mapper_map(&mapper, noteNum);
         if (ki < 0 || ki >= KEY_COUNT) continue;
@@ -404,7 +394,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         y += 35;
 
         hCheckCompress = CreateWindowW(L"BUTTON", L"\u7B49\u6BD4\u4F8B\u538B\u7F29",
-            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_TABSTOP,
             10, y, 160, 20, hWnd, (HMENU)(INT_PTR)ID_CHECK_COMPRESS,
             GetModuleHandleW(NULL), NULL);
         SendMessageW(hCheckCompress, WM_SETFONT, (WPARAM)hFont, 0);
