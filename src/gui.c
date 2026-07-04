@@ -149,21 +149,39 @@ static DWORD WINAPI PlaybackThreadProc(LPVOID lpParam)
     int lowBound = tp->baseOctave * 12;
     int highBound = tp->baseOctave * 12 + 35;
 
-    /* pre-scan for full compression */
+    /* re-init mapper with transpose=0 — we apply transpose manually so that
+       edge/full transformations operate on already-adjusted note numbers */
+    mapper_init(&mapper, tp->baseOctave, 0);
+
+    /* pre-scan for full compression (using transposed notes) */
     double fullScale = 1.0;
-    int fullCenter = 0;
+    double fullCenter = 0;
+    int fullShift = 0;
     int useFull = 0;
     if (mode == 2) {
         int minNote = 127, maxNote = 0;
         for (int i = 0; i < midi.noteCount; i++) {
-            int n = midi.notes[i].noteNumber;
+            int n = midi.notes[i].noteNumber + tp->transpose;
             if (n < minNote) minNote = n;
             if (n > maxNote) maxNote = n;
         }
         int range = maxNote - minNote;
-        if (range > 36) {
-            fullScale = 36.0 / range;
-            fullCenter = (minNote + maxNote) / 2;
+        if (range > 0) {
+            fullScale  = 36.0 / range;
+            fullCenter = (minNote + maxNote) / 2.0;
+
+            int cmprMin = (int)(fullCenter + (minNote - fullCenter) * fullScale + 0.5);
+            int cmprMax = (int)(fullCenter + (maxNote - fullCenter) * fullScale + 0.5);
+            int targetLo = tp->baseOctave * 12;
+            int targetHi = targetLo + 35;
+
+            if (cmprMin < targetLo)
+                fullShift = targetLo - cmprMin;
+            else if (cmprMax > targetHi)
+                fullShift = targetHi - cmprMax;
+            else
+                fullShift = 0;
+
             useFull = 1;
         }
     }
@@ -174,7 +192,7 @@ static DWORD WINAPI PlaybackThreadProc(LPVOID lpParam)
 
     for (int i = 0; i < midi.noteCount; i++) {
         MidiNote* mn = &midi.notes[i];
-        int noteNum = mn->noteNumber;
+        int noteNum = mn->noteNumber + tp->transpose;
         if (mode == 1) {
             if (noteNum < lowBound) {
                 int shift = ((lowBound - noteNum + 11) / 12) * 12;
@@ -185,7 +203,7 @@ static DWORD WINAPI PlaybackThreadProc(LPVOID lpParam)
             }
         } else if (useFull) {
             double c = fullCenter + (noteNum - fullCenter) * fullScale;
-            noteNum = (int)(c + 0.5);
+            noteNum = (int)(c + 0.5) + fullShift;
         }
         int ki = mapper_map(&mapper, noteNum);
         if (ki < 0 || ki >= KEY_COUNT) continue;
