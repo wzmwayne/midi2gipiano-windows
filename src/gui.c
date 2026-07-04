@@ -207,9 +207,13 @@ static DWORD WINAPI PlaybackThreadProc(LPVOID lpParam)
             double c = fullCenter + (noteNum - fullCenter) * fullScale;
             noteNum = (int)(c + 0.5) + fullShift;
         }
-        /* Edge & Full modes: fold back into the 3-octave window so that
-           the %3 wrap in mapper_map never actually wraps. */
-        if (mode != 0) {
+        /* Edge & Full: ensure result stays inside 3-octave window.
+           Full clamps (compression already mapped into 36 semitones);
+           Edge folds by octave. */
+        if (mode == 2 && useFull) {
+            if (noteNum < lowBound) noteNum = lowBound;
+            if (noteNum > highBound) noteNum = highBound;
+        } else if (mode == 1) {
             if (noteNum < lowBound) {
                 int shift = ((lowBound - noteNum + 11) / 12) * 12;
                 noteNum += shift;
