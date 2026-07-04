@@ -123,7 +123,7 @@ void pb_play(PlaybackEngine* pb)
             if (check_input(pb, t0, offset)) break;
 
             MidiNote* mn = &pb->midi.notes[i];
-            int ki = mapper_map(&pb->mapper, mn->noteNumber + pb->mapper.transpose);
+            int ki = mapper_map(&pb->mapper, mn->noteNumber);
             if (ki < 0 || ki >= KEY_COUNT) continue;
 
             long long pressAt  = t0 + mn->startMicros - offset;

@@ -192,7 +192,7 @@ static DWORD WINAPI PlaybackThreadProc(LPVOID lpParam)
 
     for (int i = 0; i < midi.noteCount; i++) {
         MidiNote* mn = &midi.notes[i];
-        int noteNum = mn->noteNumber + tp->transpose;
+        int noteNum = mn->noteNumber;
         if (mode == 1) {
             if (noteNum < lowBound) {
                 int shift = ((lowBound - noteNum + 11) / 12) * 12;
@@ -201,7 +201,9 @@ static DWORD WINAPI PlaybackThreadProc(LPVOID lpParam)
                 int shift = ((noteNum - highBound + 11) / 12) * 12;
                 noteNum -= shift;
             }
-        } else if (useFull) {
+        }
+        noteNum += tp->transpose;
+        if (useFull) {
             double c = fullCenter + (noteNum - fullCenter) * fullScale;
             noteNum = (int)(c + 0.5) + fullShift;
         }
