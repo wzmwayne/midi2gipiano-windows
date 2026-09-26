@@ -6,6 +6,8 @@
 
 #define KEY_COUNT 21
 
+extern const char KEY_LETTERS[KEY_COUNT];
+
 int key_init(void);
 void key_press(int keyIndex);
 void key_release(int keyIndex);

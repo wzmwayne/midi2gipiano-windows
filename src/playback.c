@@ -89,7 +89,7 @@ int pb_init(PlaybackEngine* pb, const char* midiFile,
         return 0;
     }
 
-    mapper_init(&pb->mapper, baseOctave, transpose);
+    mapper_init(&pb->mapper, baseOctave, transpose, MODE_IGNORE);
     pb->state = STOPPED;
     pb->pauseAtMicros = 0;
     pb->exitRequested = 0;

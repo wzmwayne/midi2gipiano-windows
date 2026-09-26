@@ -4,7 +4,7 @@ CFLAGS = -O2 -std=c99 -Wall -Wextra
 LDFLAGS = -mwindows
 LIBS =
 
-SRC = src/main.c src/gui.c src/midi_parser.c src/note_mapper.c src/key_input.c src/playback.c
+SRC = src/main.c src/gui.c src/midi_parser.c src/note_mapper.c src/key_input.c src/playback.c src/play_file.c
 OBJ = $(SRC:.c=.o)
 TARGET = midi2gipiano.exe
 

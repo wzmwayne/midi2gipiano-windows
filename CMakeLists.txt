@@ -13,6 +13,7 @@ add_executable(midi2gipiano
     src/note_mapper.c
     src/key_input.c
     src/playback.c
+    src/play_file.c
     resources/resource.rc
 )
 

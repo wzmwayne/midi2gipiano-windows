@@ -18,7 +18,7 @@ static const char* KEY_NAMES[KEY_COUNT] = {
     "do", "re", "mi", "fa", "so", "la", "ti"
 };
 
-static const char KEY_LETTERS[KEY_COUNT] = {
+const char KEY_LETTERS[KEY_COUNT] = {
     'Q', 'W', 'E', 'R', 'T', 'Y', 'U',
     'A', 'S', 'D', 'F', 'G', 'H', 'J',
     'Z', 'X', 'C', 'V', 'B', 'N', 'M'

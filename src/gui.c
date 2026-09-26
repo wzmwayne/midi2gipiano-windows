@@ -3,6 +3,7 @@
 #include "key_input.h"
 #include "note_mapper.h"
 #include "midi_parser.h"
+#include "play_file.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -21,16 +22,17 @@ enum {
     ID_STATIC_NOTE    = 1010,
     ID_STATIC_TIME    = 1011,
     ID_STATIC_PROGRESS = 1012,
-    ID_RADIO_WRAP      = 1013,
-    ID_RADIO_EDGE      = 1014,
-    ID_RADIO_FULL      = 1015,
+    ID_RADIO_IGNORE   = 1013,
+    ID_RADIO_EDGE     = 1014,
+    ID_RADIO_FULL     = 1015,
+    ID_BTN_COMPILE    = 1016,
 
     HOTKEY_ID_TOGGLE  = 1,
 };
 
 static HWND hEditFile, hEditOctave, hEditTranspose;
-static HWND hBtnBrowse, hBtnPlay, hBtnPause, hBtnStop;
-static HWND hRadioWrap, hRadioEdge, hRadioFull;
+static HWND hBtnBrowse, hBtnPlay, hBtnPause, hBtnStop, hBtnCompile;
+static HWND hRadioIgnore, hRadioEdge, hRadioFull;
 static HWND hStaticStatus, hStaticNote, hStaticTime, hStaticProgress;
 
 static HFONT hFont = NULL;
@@ -94,7 +96,7 @@ typedef struct {
     wchar_t filePath[MAX_PATH];
     int     baseOctave;
     int     transpose;
-    int     mode; /* 0 = wrap, 1 = edge fold, 2 = full compress */
+    int     mode;
 } ThreadParam;
 
 typedef enum { EV_PRESS, EV_RELEASE } EventType;
@@ -125,6 +127,72 @@ static DWORD WINAPI PlaybackThreadProc(LPVOID lpParam)
     WideCharToMultiByte(CP_UTF8, 0, tp->filePath, -1,
                         filePathA, MAX_PATH, NULL, NULL);
 
+    if (!key_init()) {
+        PostMessageW(hWnd, WM_USER_ERROR, 0, 0);
+        free(tp);
+        return 1;
+    }
+
+    /* check if this is a .giplay file */
+    int isPlayFile = 0;
+    {
+        size_t len = strlen(filePathA);
+        if (len > 7 && strcmp(filePathA + len - 7, ".giplay") == 0)
+            isPlayFile = 1;
+    }
+
+    if (isPlayFile) {
+        ParsedPlayFile pf;
+        if (!play_file_parse(filePathA, &pf)) {
+            PostMessageW(hWnd, WM_USER_ERROR, 0, 0);
+            free(tp);
+            return 1;
+        }
+
+        PostMessageW(hWnd, WM_USER_TOTAL, 0, (LPARAM)pf.totalDurationMicros);
+
+        long long t0 = timer_now();
+        for (int i = 0; i < pf.noteCount; i++) {
+            PlayNote* pn = &pf.notes[i];
+            long long elapsed = timer_now() - t0;
+            long long waitPress = pn->pressMicros - elapsed;
+            if (waitPress > 0) {
+                LARGE_INTEGER due;
+                due.QuadPart = -(waitPress * 10);
+                HANDLE hTimer = CreateWaitableTimerW(NULL, TRUE, NULL);
+                SetWaitableTimer(hTimer, &due, 0, NULL, NULL, FALSE);
+                HANDLE wa[] = { hTimer, hEventStop };
+                WaitForMultipleObjects(2, wa, FALSE, INFINITE);
+                CloseHandle(hTimer);
+                if (WaitForSingleObject(hEventStop, 0) == WAIT_OBJECT_0) break;
+            }
+            if (pn->keyIndex >= 0) {
+                key_press(pn->keyIndex);
+                PostMessageW(hWnd, WM_USER_UPDATE, 2,
+                             MAKELPARAM(-1, pn->keyIndex));
+            }
+            long long waitRelease = pn->releaseMicros - (timer_now() - t0);
+            if (waitRelease > 0) {
+                LARGE_INTEGER due;
+                due.QuadPart = -(waitRelease * 10);
+                HANDLE hTimer = CreateWaitableTimerW(NULL, TRUE, NULL);
+                SetWaitableTimer(hTimer, &due, 0, NULL, NULL, FALSE);
+                HANDLE wa[] = { hTimer, hEventStop };
+                WaitForMultipleObjects(2, wa, FALSE, INFINITE);
+                CloseHandle(hTimer);
+                if (WaitForSingleObject(hEventStop, 0) == WAIT_OBJECT_0) break;
+            }
+            if (pn->keyIndex >= 0) {
+                key_release(pn->keyIndex);
+            }
+        }
+        key_release_all();
+        play_file_free(&pf);
+        PostMessageW(hWnd, WM_USER_DONE, 0, 0);
+        free(tp);
+        return 0;
+    }
+
     ParsedMidi midi;
     if (!midi_parse(filePathA, &midi)) {
         PostMessageW(hWnd, WM_USER_ERROR, 0, 0);
@@ -133,32 +201,22 @@ static DWORD WINAPI PlaybackThreadProc(LPVOID lpParam)
     }
 
     NoteMapper mapper;
-    mapper_init(&mapper, tp->baseOctave, tp->transpose);
-
-    if (!key_init()) {
-        midi_free(&midi);
-        PostMessageW(hWnd, WM_USER_ERROR, 0, 0);
-        free(tp);
-        return 1;
-    }
+    int mode = tp->mode;
+    mapper_init(&mapper, tp->baseOctave, tp->transpose, mode);
 
     PostMessageW(hWnd, WM_USER_TOTAL, 0, (LPARAM)midi.totalDurationMicros);
 
-    /* mode: 0=wrap, 1=edge fold, 2=full compress */
-    int mode = tp->mode;
     int lowBound = tp->baseOctave * 12;
     int highBound = tp->baseOctave * 12 + 35;
 
-    /* re-init mapper with transpose=0 — we apply transpose manually so that
-       edge/full transformations operate on already-adjusted note numbers */
-    mapper_init(&mapper, tp->baseOctave, 0);
+    mapper_init(&mapper, tp->baseOctave, 0, mode);
 
     /* pre-scan for full compression (using transposed notes) */
     double fullScale = 1.0;
     double fullCenter = 0;
     int fullShift = 0;
     int useFull = 0;
-    if (mode == 2) {
+    if (mode == MODE_FULL) {
         int minNote = 127, maxNote = 0;
         for (int i = 0; i < midi.noteCount; i++) {
             int n = midi.notes[i].noteNumber + tp->transpose;
@@ -193,7 +251,7 @@ static DWORD WINAPI PlaybackThreadProc(LPVOID lpParam)
     for (int i = 0; i < midi.noteCount; i++) {
         MidiNote* mn = &midi.notes[i];
         int noteNum = mn->noteNumber;
-        if (mode == 1) {
+        if (mode == MODE_EDGE) {
             if (noteNum < lowBound) {
                 int shift = ((lowBound - noteNum + 11) / 12) * 12;
                 noteNum += shift;
@@ -207,13 +265,10 @@ static DWORD WINAPI PlaybackThreadProc(LPVOID lpParam)
             double c = fullCenter + (noteNum - fullCenter) * fullScale;
             noteNum = (int)(c + 0.5) + fullShift;
         }
-        /* Edge & Full: ensure result stays inside 3-octave window.
-           Full clamps (compression already mapped into 36 semitones);
-           Edge folds by octave. */
-        if (mode == 2 && useFull) {
+        if (mode == MODE_FULL && useFull) {
             if (noteNum < lowBound) noteNum = lowBound;
             if (noteNum > highBound) noteNum = highBound;
-        } else if (mode == 1) {
+        } else if (mode == MODE_EDGE) {
             if (noteNum < lowBound) {
                 int shift = ((lowBound - noteNum + 11) / 12) * 12;
                 noteNum += shift;
@@ -221,6 +276,8 @@ static DWORD WINAPI PlaybackThreadProc(LPVOID lpParam)
                 int shift = ((noteNum - highBound + 11) / 12) * 12;
                 noteNum -= shift;
             }
+        } else if (mode == MODE_IGNORE) {
+            if (noteNum < lowBound || noteNum > highBound) continue;
         }
         int ki = mapper_map(&mapper, noteNum);
         if (ki < 0 || ki >= KEY_COUNT) continue;
@@ -343,9 +400,9 @@ static void BeginPlayback(HWND hWnd)
     ResetEvent(hEventPause);
     ResetEvent(hEventResume);
 
-    int mode = 0;
-    if (SendMessageW(hRadioEdge, BM_GETCHECK, 0, 0)) mode = 1;
-    if (SendMessageW(hRadioFull, BM_GETCHECK, 0, 0)) mode = 2;
+    int mode = MODE_IGNORE;
+    if (SendMessageW(hRadioEdge, BM_GETCHECK, 0, 0)) mode = MODE_EDGE;
+    if (SendMessageW(hRadioFull, BM_GETCHECK, 0, 0)) mode = MODE_FULL;
 
     ThreadParam* tp = malloc(sizeof(ThreadParam));
     tp->hWnd = hWnd;
@@ -457,31 +514,33 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         y += 35;
 
         CreateLabel(hWnd, 0, L"\u5904\u7406\u65B9\u5F0F:", 10, y+2, 60, 20);
-        hRadioWrap = CreateWindowW(L"BUTTON", L"\u5FAA\u73AF",
+        hRadioIgnore = CreateWindowW(L"BUTTON", L"\u5FFD\u7565",
             WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON | WS_GROUP,
-            70, y, 50, 20, hWnd, (HMENU)(INT_PTR)ID_RADIO_WRAP,
+            70, y, 50, 20, hWnd, (HMENU)(INT_PTR)ID_RADIO_IGNORE,
             GetModuleHandleW(NULL), NULL);
-        hRadioEdge = CreateWindowW(L"BUTTON", L"\u8FB9\u7F18\u6298\u53E0",
+        hRadioEdge = CreateWindowW(L"BUTTON", L"\u8FB9\u7F18",
             WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
-            120, y, 70, 20, hWnd, (HMENU)(INT_PTR)ID_RADIO_EDGE,
+            120, y, 50, 20, hWnd, (HMENU)(INT_PTR)ID_RADIO_EDGE,
             GetModuleHandleW(NULL), NULL);
-        hRadioFull = CreateWindowW(L"BUTTON", L"\u6574\u4F53\u538B\u7F29",
+        hRadioFull = CreateWindowW(L"BUTTON", L"\u538B\u7F29",
             WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
-            190, y, 80, 20, hWnd, (HMENU)(INT_PTR)ID_RADIO_FULL,
+            170, y, 50, 20, hWnd, (HMENU)(INT_PTR)ID_RADIO_FULL,
             GetModuleHandleW(NULL), NULL);
-        SendMessageW(hRadioWrap, WM_SETFONT, (WPARAM)hFont, 0);
+        SendMessageW(hRadioIgnore, WM_SETFONT, (WPARAM)hFont, 0);
         SendMessageW(hRadioEdge, WM_SETFONT, (WPARAM)hFont, 0);
         SendMessageW(hRadioFull, WM_SETFONT, (WPARAM)hFont, 0);
-        SendMessageW(hRadioWrap, BM_SETCHECK, BST_CHECKED, 0);
+        SendMessageW(hRadioIgnore, BM_SETCHECK, BST_CHECKED, 0);
         y += 25;
 
-        hBtnPlay  = CreateButtonW(hWnd, ID_BTN_PLAY,  L"\u25B6 \u64AD\u653E",  10, y, 80, 30);
-        hBtnPause = CreateButtonW(hWnd, ID_BTN_PAUSE, L"\u23F8 \u6682\u505C",  95, y, 80, 30);
-        hBtnStop  = CreateButtonW(hWnd, ID_BTN_STOP,  L"\u23F9 \u505C\u6B62", 180, y, 80, 30);
-        CreateButtonW(hWnd, ID_BTN_EXIT, L"\u2715 \u9000\u51FA", 280, y, 80, 30);
-        SendMessageW(hBtnPlay,  WM_SETFONT, (WPARAM)hFont, 0);
-        SendMessageW(hBtnPause, WM_SETFONT, (WPARAM)hFont, 0);
-        SendMessageW(hBtnStop,  WM_SETFONT, (WPARAM)hFont, 0);
+        hBtnPlay  = CreateButtonW(hWnd, ID_BTN_PLAY,  L"\u25B6 \u64AD\u653E",  10, y, 70, 30);
+        hBtnPause = CreateButtonW(hWnd, ID_BTN_PAUSE, L"\u23F8 \u6682\u505C",  85, y, 70, 30);
+        hBtnStop  = CreateButtonW(hWnd, ID_BTN_STOP,  L"\u23F9 \u505C\u6B62", 160, y, 70, 30);
+        hBtnCompile = CreateButtonW(hWnd, ID_BTN_COMPILE, L"\u7F16\u8BD1", 235, y, 50, 30);
+        CreateButtonW(hWnd, ID_BTN_EXIT, L"\u2715 \u9000\u51FA", 290, y, 70, 30);
+        SendMessageW(hBtnPlay,    WM_SETFONT, (WPARAM)hFont, 0);
+        SendMessageW(hBtnPause,   WM_SETFONT, (WPARAM)hFont, 0);
+        SendMessageW(hBtnStop,    WM_SETFONT, (WPARAM)hFont, 0);
+        SendMessageW(hBtnCompile, WM_SETFONT, (WPARAM)hFont, 0);
         SendMessageW(GetDlgItem(hWnd, ID_BTN_EXIT), WM_SETFONT, (WPARAM)hFont, 0);
         EnableWindow(hBtnPause, FALSE);
         EnableWindow(hBtnStop,  FALSE);
@@ -522,7 +581,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             ZeroMemory(&ofn, sizeof(ofn));
             ofn.lStructSize = sizeof(ofn);
             ofn.hwndOwner   = hWnd;
-            ofn.lpstrFilter = L"MIDI \u6587\u4EF6\0*.mid;*.midi\0\u6240\u6709\u6587\u4EF6\0*.*\0";
+            ofn.lpstrFilter = L"MIDI / \u5F39\u594F\u6587\u4EF6\0*.mid;*.midi;*.giplay\0\u6240\u6709\u6587\u4EF6\0*.*\0";
             ofn.lpstrFile   = file;
             ofn.nMaxFile    = MAX_PATH;
             ofn.Flags       = OFN_FILEMUSTEXIST | OFN_HIDEREADONLY;
@@ -539,6 +598,66 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         case ID_BTN_STOP:
             DoStopPlayback(hWnd);
             break;
+        case ID_BTN_COMPILE: {
+            wchar_t filePathW[MAX_PATH];
+            GetWindowTextW(hEditFile, filePathW, MAX_PATH);
+            if (filePathW[0] == 0) {
+                SetWindowTextW(hStaticStatus, L"\u8BF7\u5148\u9009\u62E9 MIDI \u6587\u4EF6");
+                break;
+            }
+            char filePathA[MAX_PATH];
+            WideCharToMultiByte(CP_UTF8, 0, filePathW, -1,
+                                filePathA, MAX_PATH, NULL, NULL);
+
+            ParsedMidi midi;
+            if (!midi_parse(filePathA, &midi)) {
+                SetWindowTextW(hStaticStatus, L"\u89E3\u6790 MIDI \u5931\u8D25");
+                break;
+            }
+
+            wchar_t buf[16];
+            GetWindowTextW(hEditOctave, buf, 16);
+            int octave = _wtoi(buf);
+            GetWindowTextW(hEditTranspose, buf, 16);
+            int transpose = _wtoi(buf);
+            int mode = MODE_IGNORE;
+            if (SendMessageW(hRadioEdge, BM_GETCHECK, 0, 0)) mode = MODE_EDGE;
+            if (SendMessageW(hRadioFull, BM_GETCHECK, 0, 0)) mode = MODE_FULL;
+
+            NoteMapper mapper;
+            mapper_init(&mapper, octave, transpose, mode);
+
+            /* get source name */
+            const char* srcName = strrchr(filePathA, '\\');
+            if (!srcName) srcName = strrchr(filePathA, '/');
+            if (srcName) srcName++; else srcName = filePathA;
+
+            char* outBuf = malloc(4 * 1024 * 1024);
+            int len = play_file_compile(&midi, &mapper, srcName, outBuf, 4 * 1024 * 1024);
+            midi_free(&midi);
+
+            /* build output path: replace .mid/.midi with .giplay */
+            char outPath[MAX_PATH];
+            strncpy(outPath, filePathA, MAX_PATH);
+            char* ext = strrchr(outPath, '.');
+            if (ext) strcpy(ext, ".giplay");
+            else strcat(outPath, ".giplay");
+
+            FILE* f = fopen(outPath, "w");
+            if (f) {
+                fwrite(outBuf, 1, len, f);
+                fclose(f);
+                wchar_t msg[256];
+                wchar_t outPathW[MAX_PATH];
+                MultiByteToWideChar(CP_UTF8, 0, outPath, -1, outPathW, MAX_PATH);
+                swprintf(msg, 256, L"\u2705 \u7F16\u8BD1\u5B8C\u6210: %s", outPathW);
+                SetWindowTextW(hStaticStatus, msg);
+            } else {
+                SetWindowTextW(hStaticStatus, L"\u274C \u4FDD\u5B58\u5931\u8D25");
+            }
+            free(outBuf);
+            break;
+        }
         case ID_BTN_EXIT:
             DoStopPlayback(hWnd);
             DestroyWindow(hWnd);
@@ -650,7 +769,7 @@ int GuiRun(HINSTANCE hInstance, int nCmdShow)
                                 L"MIDI \u2192 \u98CE\u7269\u4E4B\u8BD7\u7434 \u81EA\u52A8\u6F14\u594F",
                                 WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
                                 CW_USEDEFAULT, CW_USEDEFAULT,
-                                400, 290, NULL, NULL, hInstance, NULL);
+                                420, 290, NULL, NULL, hInstance, NULL);
     if (!hWnd) return 1;
 
     ShowWindow(hWnd, nCmdShow);
